@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, Jacques Gagnon
+ * Copyright (c) 2025, Nicolas FIERS, based on Blueretro (Jacques Gagnon)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,6 +23,12 @@
 #include "macro.h"
 #include "bluetooth/host.h"
 #include "tests/cmds.h"
+
+/* --- AJOUT PERSO : Variables globales pour le Mute --- */
+// On utilise BT_MAX_DEV car on veut suivre l'état par manette connectée, pas par port de sortie
+static bool bt_dev_is_muted[BT_MAX_DEV] = {0}; 
+static bool bt_last_view_state[BT_MAX_DEV] = {0};
+/* ---------------------------------------------------- */
 
 const uint32_t hat_to_ld_btns[16] = {
     BIT(PAD_LD_UP), BIT(PAD_LD_UP) | BIT(PAD_LD_RIGHT), BIT(PAD_LD_RIGHT), BIT(PAD_LD_DOWN) | BIT(PAD_LD_RIGHT),
@@ -407,12 +413,15 @@ int8_t btn_sign(uint32_t polarity, uint8_t btn_id) {
     return 1;
 }
 
+
+
 void IRAM_ATTR adapter_init_buffer(uint8_t wired_id) {
-    if (wired_adapter.system_id != WIRED_AUTO) {
+    if (wired_adapter.system_id != WIRED_AUTO) {    
         wired_adapter.data[wired_id].index = wired_id;
         wired_init_buffer(config.out_cfg[wired_id].dev_mode, &wired_adapter.data[wired_id]);
     }
 }
+
 
 void adapter_bridge(struct bt_data *bt_data) {
     uint32_t out_mask = 0;
@@ -423,10 +432,64 @@ void adapter_bridge(struct bt_data *bt_data) {
             return;
         }
 
+        /* --- DEBUT CORRECTION : Déclaration de l'ID --- */
+        int32_t bt_dev_id = bt_data->base.pids->id;
+        /* --- FIN CORRECTION --- */
+
+        /* --- DEBUT MODIFICATION PERSO --- */
+        if (bt_dev_id >= 0 && bt_dev_id < BT_MAX_DEV) {
+        
+            bool view_pressed = false;
+
+            /* --- LOGIQUE DE MAPPING INVERSÉ --- */
+            struct in_cfg * cfg = &config.in_cfg[bt_data->base.pids->out_idx];
+
+            /* On parcourt toutes les règles de mapping définies dans WebConfig */
+            for (uint32_t i = 0; i < cfg->map_size; i++) {
+            
+                /* Si la destination de la règle est PAD_MS (le bouton VIEW/SELECT mappé) */
+                if (cfg->map_cfg[i].dst_btn == PAD_MS) {
+                
+                    /* On identifie quel bouton physique (source) déclenche cela */
+                    uint8_t src = cfg->map_cfg[i].src_btn;
+                    uint32_t src_mask = BIT(src & 0x1F);
+                    uint32_t src_btn_idx = btn_id_to_btn_idx(src);
+
+                    /* On vérifie si ce bouton physique est actuellement appuyé */
+                    if (ctrl_input->btns[src_btn_idx].value & src_mask) {
+                        view_pressed = true;
+                        break; /* On a trouvé un appui valide, on sort de la boucle */
+                    }
+                }
+            }
+        
+            /* Sécurité si aucun mapping défini */
+            if (cfg->map_size == 0) {
+                 view_pressed = (ctrl_input->btns[0].value & BIT(PAD_MS));
+            }
+
+            /* --- FIN LOGIQUE --- */
+
+            /* Gestion du basculement (Toggle) Mute */
+            if (view_pressed && !bt_last_view_state[bt_dev_id]) {
+                bt_dev_is_muted[bt_dev_id] = !bt_dev_is_muted[bt_dev_id];
+                ets_printf("BT Dev %ld : Mute toggle -> %d (via Mapped PAD_MS)\n", bt_dev_id, bt_dev_is_muted[bt_dev_id]);
+            }
+            bt_last_view_state[bt_dev_id] = view_pressed;
+
+            /* Application du Mute */
+            if (bt_dev_is_muted[bt_dev_id]) {
+                for (int b = 0; b < 4; b++) ctrl_input->btns[b].value = 0;
+                for (int a = 0; a < 6; a++) ctrl_input->axes[a].value = 0;
+            }
+        }
+        /* --- FIN MODIFICATION PERSO --- */
+
 #ifdef CONFIG_BLUERETRO_ADAPTER_INPUT_DBG
         TESTS_CMDS_LOG("\"generic_input\": {");
         adapter_debug_wireless_print(ctrl_input);
 #endif
+
         if (wired_adapter.system_id != WIRED_AUTO) {
             if (wired_meta_init(ctrl_output)) {
                 /* Unsupported system */
@@ -442,6 +505,7 @@ void adapter_bridge(struct bt_data *bt_data) {
 #endif
             ctrl_output[bt_data->base.pids->out_idx].index = bt_data->base.pids->out_idx;
             sys_macro_hdl(&ctrl_output[bt_data->base.pids->out_idx], &bt_data->base.flags[PAD]);
+
             for (uint32_t i = 0; out_mask; i++, out_mask >>= 1) {
                 if (out_mask & 0x1) {
                     ctrl_output[i].index = i;
@@ -471,14 +535,17 @@ void adapter_fb_stop_timer_stop(uint8_t dev_id) {
     }
 }
 
-bool adapter_bridge_fb(struct raw_fb *fb_data, struct bt_data *bt_data) {
-    bool ret = false;
+uint32_t adapter_bridge_fb(struct raw_fb *fb_data, struct bt_data *bt_data) {
+    uint32_t ret = 0;
 
     if (wired_adapter.system_id != WIRED_AUTO && bt_data && bt_data->base.pids) {
         wired_fb_to_generic(config.out_cfg[bt_data->base.pids->id].dev_mode, fb_data, &fb_input);
 
         if (bt_data->base.pids->type != BT_NONE) {
-            ret = wireless_fb_from_generic(&fb_input, bt_data);
+            wireless_fb_from_generic(&fb_input, bt_data);
+            if (fb_data->header.type == FB_TYPE_RUMBLE) {
+                ret = fb_input.state;
+            }
         }
     }
     return ret;
@@ -515,7 +582,9 @@ void adapter_toggle_fb(uint32_t wired_id, uint32_t duration_us, uint8_t lf_pwr, 
 }
 
 void adapter_init(void) {
-    wired_adapter.system_id = WIRED_AUTO;
+    // MODIFICATION : On force le système en PARALLEL_1P_OD par défaut
+    //wired_adapter.system_id = WIRED_AUTO;
+    wired_adapter.system_id = PARALLEL_1P_OD;
 
     /* Save regular DRAM by allocating big sruct w/ only 32bits access in IRAM */
     ctrl_input = heap_caps_aligned_alloc(32, sizeof(struct wireless_ctrl), MALLOC_CAP_32BIT);
@@ -540,7 +609,46 @@ void adapter_init(void) {
 }
 
 void adapter_meta_init(void) {
+    // MODIFICATION : On écrase toute config chargée depuis le Web/Flash (ligne ajoutee)
+    wired_adapter.system_id = PARALLEL_1P_OD;
+    // fin modif
     if (wired_adapter.system_id != WIRED_AUTO) {
         wired_meta_init(ctrl_output);
     }
 }
+
+//***** AJOUT pour etat led device non-muted*/ 
+//bool br_device_unmuted(int id) {
+//
+//    if (id < 0 || id >= BT_MAX_DEVICES) return false;
+//
+//    const struct bt_data *d = &bt_adapter.data[id];
+//
+    // Pas actif ?
+//    if (!(d->flags & BT_ADAPTER_FLAG_ACTIVE))
+//        return false;
+
+    // Muted ?
+//    if (d->inhibit)
+//        return false;
+
+    // Donc : actif + non-mute
+//    return true;
+//}
+
+//***** Fin de l'ajout */
+
+/* --- AJOUT PERSO : Fonction publique pour led.c --- */
+bool adapter_is_device_connected_and_unmuted(uint8_t dev_id) {
+    if (dev_id >= BT_MAX_DEV) {
+        return false;
+    }
+    // Vérification de sécurité (pointeurs et type)
+    if (bt_adapter.data[dev_id].base.pids == NULL || 
+        bt_adapter.data[dev_id].base.pids->type == BT_NONE) {
+        return false;
+    }
+    // Si connecté, retourne TRUE si NON muté
+    return !bt_dev_is_muted[dev_id];
+}
+/* -------------------------------------------------- */
