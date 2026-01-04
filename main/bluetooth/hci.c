@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, Jacques Gagnon
+ * Copyright (c) 2025, Nicolas FIERS, based on Blueretro (Jacques Gagnon)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -66,7 +66,7 @@ static uint32_t bt_config_state = 0;
 static uint32_t inquiry_state = 0;
 static uint32_t inquiry_override = 0;
 static RingbufHandle_t randq_hdl, encryptq_hdl;
-static char local_name[24] = "BlueRetro";
+static char local_name[24] = "Pinclusive"; //** MODIFIED NFI */
 
 static void bt_hci_cmd(uint16_t opcode, uint32_t cp_len);
 //static void bt_hci_cmd_inquiry(void *cp);
@@ -1119,16 +1119,6 @@ static void bt_hci_le_meta_evt_hdlr(struct bt_hci_pkt *bt_hci_evt_pkt) {
                                 goto skip;
                             }
                             break;
-                        case BT_DATA_MANUFACTURER_DATA:
-                            /* Manufacturer Specific Data */
-                            value = *(uint16_t *)&data[1];
-                            if (value == 0x0553) {
-                                uint16_t vid = *(uint16_t *)&data[6];
-                                if (vid == 0x057e) {
-                                    goto connect;
-                                }
-                            }
-                            break;
                     }
                     data += len;
                 }
@@ -1235,8 +1225,8 @@ static int32_t bt_hci_get_encrypt_context(struct bt_dev **device, bt_hci_le_cb_t
 
 static void bt_hci_set_device_name(void) {
     strcat(local_name, "_");
-    strncat(local_name, wired_get_sys_name(), 6);
-    strcat(local_name, "_");
+    //strncat(local_name, wired_get_sys_name(), 6); *** NFI MOD
+    //strcat(local_name, "_"); *** NFI MOD
     snprintf(local_name + strlen(local_name), 5, "%02X%02X", local_bdaddr[1], local_bdaddr[0]);
     printf("# local_name: %s\n", local_name);
 }
