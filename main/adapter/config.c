@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, Jacques Gagnon
+ * Copyright (c) 2025, Nicolas FIERS, based on Blueretro (Jacques Gagnon)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,7 +15,6 @@
 #include "system/fs.h"
 #include "adapter/gameid.h"
 #include "bluetooth/mon.h"
-#include "system/manager.h"
 
 struct config config;
 struct hw_config hw_config = {
@@ -114,7 +113,6 @@ static uint32_t config_version_magic[] = {
 static uint8_t config_default_combo[BR_COMBO_CNT] = {
     PAD_LM, PAD_RM, PAD_MM, PAD_RB_UP, PAD_RB_LEFT, PAD_RB_RIGHT, PAD_RB_DOWN, PAD_LD_UP, PAD_LD_DOWN, PAD_MS
 };
-static bool config_rst_bare_core = false;
 
 static void config_init_struct(struct config *data);
 static void config_init_nvs_patch(struct config *data);
@@ -214,6 +212,24 @@ static int32_t hw_config_lookup_key_name(const char* key) {
     return -1;
 }
 
+/* --- DEBUT MODIFICATION : TABLE PAR DEFAUT REDUITE --- */
+static const struct map_cfg custom_default_map[] = {
+    /* 1. Left Trigger */
+    {.src_btn = PAD_LS, .dst_btn = PAD_LM, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 2. Right Trigger */
+    {.src_btn = PAD_RS, .dst_btn = PAD_RM, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 3. Start */
+    {.src_btn = PAD_RB_DOWN, .dst_btn = PAD_RB_DOWN, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 4. Fire */
+    {.src_btn = PAD_RB_RIGHT, .dst_btn = PAD_RB_RIGHT, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 5. Opt1 */
+    {.src_btn = PAD_RB_LEFT, .dst_btn = PAD_LD_LEFT, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 6.Opt2 */
+    {.src_btn = PAD_RB_UP, .dst_btn = PAD_RB_LEFT, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+    /* 7. Bouton SELECT / VIEW (Celui utilisé pour le MUTE) */
+    {.src_btn = PAD_MS, .dst_btn = PAD_MS, .perc_max = 100, .perc_threshold = 50, .perc_deadzone = 135},
+};
+
 static void config_init_struct(struct config *data) {
     data->magic = CONFIG_MAGIC;
     data->global_cfg.system_cfg = WIRED_AUTO;
@@ -221,35 +237,34 @@ static void config_init_struct(struct config *data) {
     data->global_cfg.inquiry_mode = INQ_AUTO;
     data->global_cfg.banksel = 0;
 
+    /* Calcul de la taille de notre table personnalisée */
+    uint32_t custom_size = sizeof(custom_default_map) / sizeof(custom_default_map[0]);
+
     for (uint32_t i = 0; i < WIRED_MAX_DEV; i++) {
         data->out_cfg[i].dev_mode = DEV_PAD;
         data->out_cfg[i].acc_mode = ACC_NONE;
         data->in_cfg[i].bt_dev_id = 0x00; /* Not used placeholder */
         data->in_cfg[i].bt_subdev_id = 0x00;  /* Not used placeholder */
-        data->in_cfg[i].map_size = KBM_MAX + BR_COMBO_CNT;
-        uint32_t j = 0;
-        for (; j < KBM_MAX; j++) {
-            data->in_cfg[i].map_cfg[j].src_btn = j;
-            data->in_cfg[i].map_cfg[j].dst_btn = j;
+        
+        /* On définit la taille initiale à 7 lignes seulement */
+        data->in_cfg[i].map_size = custom_size;
+
+        /* On copie notre table de 7 lignes */
+        for (uint32_t j = 0; j < custom_size; j++) {
+            data->in_cfg[i].map_cfg[j] = custom_default_map[j];
+            
+            /* On s'assure que le mapping pointe vers le bon port (dst_id) */
             data->in_cfg[i].map_cfg[j].dst_id = i;
-            data->in_cfg[i].map_cfg[j].perc_max = 100;
-            data->in_cfg[i].map_cfg[j].perc_threshold = 50;
-            data->in_cfg[i].map_cfg[j].perc_deadzone = 135;
+            
+            /* Initialisation des valeurs par défaut */
             data->in_cfg[i].map_cfg[j].turbo = 0;
             data->in_cfg[i].map_cfg[j].algo = 0;
-        }
-        for (uint32_t k = 0; k < BR_COMBO_CNT; j++, k++) {
-            data->in_cfg[i].map_cfg[j].src_btn = config_default_combo[k];
-            data->in_cfg[i].map_cfg[j].dst_btn = k + BR_COMBO_BASE_1;
-            data->in_cfg[i].map_cfg[j].dst_id = i;
-            data->in_cfg[i].map_cfg[j].perc_max = 100;
-            data->in_cfg[i].map_cfg[j].perc_threshold = 50;
-            data->in_cfg[i].map_cfg[j].perc_deadzone = 135;
-            data->in_cfg[i].map_cfg[j].turbo = 0;
-            data->in_cfg[i].map_cfg[j].algo = 0;
+            /* Suppression de .swap = 0 qui causait l'erreur */
         }
     }
 }
+/* --- FIN MODIFICATION --- */
+
 
 static void config_init_nvs_patch(struct config *data) {
     esp_err_t err;
@@ -386,36 +401,6 @@ static int32_t config_store_on_file(struct config *data, char *filename) {
     return ret;
 }
 
-static bool config_is_rst_required(void) {
-    static uint32_t magic = 0;
-    static uint8_t multitap_cfg = 0;
-    static uint8_t dev_mode[WIRED_MAX_DEV] = {0};
-    bool ret = false;
-
-    if (multitap_cfg != config.global_cfg.multitap_cfg) {
-        ret = true;
-    }
-    multitap_cfg = config.global_cfg.multitap_cfg;
-
-    for (uint32_t i = 0; i < WIRED_MAX_DEV; i++) {
-        if (dev_mode[i] != config.out_cfg[i].dev_mode) {
-            ret = true;
-        }
-        dev_mode[i] = config.out_cfg[i].dev_mode;
-    }
-
-    if (magic != config.magic) {
-        ret = false;
-    }
-    magic = config.magic;
-
-    return ret;
-} 
-
-void IRAM_ATTR config_set_rst_bare_core(bool value) {
-    config_rst_bare_core = value;
-}
-
 void hw_config_patch(void) {
     esp_err_t err;
     nvs_handle_t nvs;
@@ -459,10 +444,6 @@ void config_init(uint32_t src) {
     }
 
     config_load_from_file(&config, filename);
-    if (config_rst_bare_core && config_is_rst_required()) {
-        sys_mgr_cmd(SYS_MGR_CMD_WIRED_RST);
-        printf("# %s: Reloaded wired core cfg: %s\n", __FUNCTION__, filename);
-    }
 }
 
 void config_update(uint32_t dst) {
@@ -478,10 +459,6 @@ void config_update(uint32_t dst) {
     }
 
     config_store_on_file(&config, filename);
-    if (config_rst_bare_core && config_is_rst_required()) {
-        sys_mgr_cmd(SYS_MGR_CMD_WIRED_RST);
-        printf("# %s: Reloaded wired core cfg: %s\n", __FUNCTION__, filename);
-    }
 }
 
 uint32_t config_get_src(void) {
