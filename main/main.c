@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, Jacques Gagnon
+ * Copyright (c) 2025, Nicolas FIERS, based on Blueretro (Jacques Gagnon)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -28,6 +28,10 @@
 #include "tests/ws_srv.h"
 #include "tests/coverage.h"
 #include "sdkconfig.h"
+#include "driver/gpio.h" // <<< AJOUT : Nécessaire pour contrôler les GPIO directement
+
+// <<< AJOUT : Définition de la broche pour le Heartbeat (GPIO 4 recommandé)
+#define HEARTBEAT_PIN 4
 
 static uint32_t chip_package = EFUSE_RD_CHIP_VER_PKG_ESP32D0WDQ6;
 
@@ -148,10 +152,33 @@ static void wl_init_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// <<< AJOUT : La tâche de Heartbeat "Watchdog"
+static void heartbeat_task(void *arg) {
+    // Configuration de la broche en sortie
+    gpio_reset_pin(HEARTBEAT_PIN);
+    gpio_set_direction(HEARTBEAT_PIN, GPIO_MODE_OUTPUT);
+
+    while (1) {
+        // Allumé 100ms
+        gpio_set_level(HEARTBEAT_PIN, 1);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+
+        // Eteint 900ms
+        gpio_set_level(HEARTBEAT_PIN, 0);
+        vTaskDelay(900 / portTICK_PERIOD_MS);
+        
+        // Si cette LED arrête de clignoter, c'est que le FreeRTOS a crashé
+    }
+}
+
 void app_main()
 {
     adapter_init();
 
     start_app_cpu(wired_init_task);
     xTaskCreatePinnedToCore(wl_init_task, "wl_init_task", 2560, NULL, 10, NULL, 0);
+
+    // <<< AJOUT : Lancement de la tâche Heartbeat sur le Core 0
+    // Priorité 1 (basse) pour ne pas gêner le Bluetooth, Stack 1024 suffisant pour une LED
+    xTaskCreatePinnedToCore(heartbeat_task, "heartbeat_task", 3072, NULL, 1, NULL, 0);
 }

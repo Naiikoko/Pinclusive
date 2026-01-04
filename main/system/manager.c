@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, Jacques Gagnon
+ * Copyright (c) 2025, Nicolas FIERS, based on Blueretro (Jacques Gagnon)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,7 +19,6 @@
 #include "esp_rom_gpio.h"
 #include "adapter/adapter.h"
 #include "adapter/config.h"
-#include "adapter/memory_card.h"
 #include "bluetooth/host.h"
 #include "bluetooth/hci.h"
 #include "wired/wired_bare.h"
@@ -341,7 +340,7 @@ static void wired_port_hdl(void) {
             update++;
         }
     }
-    if (update && !mc_get_state()) {
+    if (update) {
         printf("# %s: Update ports state: %04X\n", __FUNCTION__, port_mask);
         wired_bare_port_cfg(port_mask);
         port_state = port_mask;
@@ -366,7 +365,8 @@ static void boot_btn_hdl(void) {
     if (inhibit_cnt && inhibit_cnt--) {
         /* Power off on quick double press */
         if (check_qdp && sys_mgr_get_power() && sys_mgr_get_boot_btn()) {
-            sys_mgr_power_off();
+            // ********** MODIFICATION pour pas de power off 
+            //sys_mgr_power_off();
             check_qdp = 0;
         }
         return;
@@ -378,15 +378,26 @@ static void boot_btn_hdl(void) {
 
         while (sys_mgr_get_boot_btn()) {
             hold_cnt++;
-            if (hold_cnt > (hw_config.sw_io0_hold_thres_ms[state] / 10) && state < SYS_MGR_BTN_STATE3) {
+
+            // --- DEBUT MODIFICATION TIMING POUR PASSER A 30SEC LE RESET CONFIG ---
+            // On récupère le seuil normal
+            uint32_t threshold = hw_config.sw_io0_hold_thres_ms[state] / 10;
+            // Si on est à l'étape avant le Reset Config (généralement state 1),
+            // on force le seuil à 3000 (30 secondes) au lieu de 10s par défaut.
+            if (state == 1) { 
+                threshold = 3000; 
+            }
+            // ---------------------------------
+
+            if (hold_cnt > threshold && state < SYS_MGR_BTN_STATE3) { // was : if (hold_cnt > (hw_config.sw_io0_hold_thres_ms[state] / 10) && state < SYS_MGR_BTN_STATE3) {
                 ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, hw_config.led_flash_duty_cycle, 0);
                 ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1, hw_config.led_flash_hz[state]);
                 state++;
             }
-            if (hold_cnt == 3000) {
-                printf("# FW will be factory reset\n");
-                factory_reset = true;
-            }
+            //if (hold_cnt == 3000) {     #Suppression de la possibilite de factory reset
+            //    printf("# FW will be factory reset\n");  #Suppression de la possibilite de factory reset
+            //    factory_reset = true;  #Suppression de la possibilite de factory reset
+            //}
             vTaskDelay(10 / portTICK_PERIOD_MS);
         }
 
@@ -571,13 +582,6 @@ void sys_mgr_cmd(uint8_t cmd) {
             printf("# %s cmd_q full!\n", __FUNCTION__);
         }
     }
-    else {
-        printf("# %s cmd_q_hdl NULL!\n", __FUNCTION__);
-        if (cmd == SYS_MGR_CMD_WIRED_RST) {
-            /* For gameid cfg we may need to reset bare core very early */
-            sys_mgr_wired_reset();
-        }
-    }
 }
 
 void sys_mgr_init(uint32_t package) {
@@ -647,9 +651,12 @@ void sys_mgr_init(uint32_t package) {
             hw_config.ports_sense_p3_p4_as_output = 1;
             break;
         case N64:
+            hw_config.port_cnt = 4;
+            break;
         case DC:
         case GC:
             hw_config.port_cnt = 4;
+            hw_config.hotplug = 1;
             break;
         case PARALLEL_1P:
         case PCE:
